@@ -1,10 +1,33 @@
+// ================= IMPORTS =================
 import { initializeApp } from "firebase/app";
 import { getAnalytics } from "firebase/analytics";
-import { getFirestore, doc, setDoc, getDoc, collection, updateDoc, deleteDoc, onSnapshot, getDocs, query, where } from "firebase/firestore";
-import { getDatabase, ref, set, get, onValue, update, remove } from "firebase/database";
-import { getAuth, onAuthStateChanged } from "firebase/auth";
+import {
+  getFirestore,
+  doc,
+  setDoc,
+  getDoc,
+  collection,
+  onSnapshot,
+  getDocs,
+  query,
+  where
+} from "firebase/firestore";
 
-// --- FIREBASE CONFIGURATION (PROVIDED BY USER) ---
+import {
+  getDatabase,
+  ref,
+  set,
+  get,
+  onValue,
+  update
+} from "firebase/database";
+
+import {
+  getAuth,
+  onAuthStateChanged
+} from "firebase/auth";
+
+// ================= FIREBASE CONFIG =================
 const firebaseConfig = {
   apiKey: "AIzaSyC7N3IOa7GRETNRBo8P-QKVFzg2bLqoEco",
   authDomain: "students-app-deae5.firebaseapp.com",
@@ -15,196 +38,137 @@ const firebaseConfig = {
   appId: "1:128267767708:web:08ed73b1563b2f3eb60259"
 };
 
-// Initialize Firebase
-const app = initializeApp(firebaseConfig);
-const analytics = getAnalytics(app);
-const db = getFirestore(app);
-const rtdb = getDatabase(app);
-const auth = getAuth(app);
+// ================= INIT =================
+export const app = initializeApp(firebaseConfig);
+export const analytics = getAnalytics(app);
+export const db = getFirestore(app);
+export const rtdb = getDatabase(app);
+export const auth = getAuth(app);
 
-// --- EXPORTED HELPERS ---
-
-export const checkFirebaseConnection = () => {
-  return true; 
-};
-
+// ================= AUTH =================
 export const subscribeToAuth = (callback: (user: any) => void) => {
   return onAuthStateChanged(auth, (user) => {
     callback(user);
   });
 };
 
-// --- DUAL WRITE / SMART READ LOGIC ---
-
-// 1. User Data Sync
-export const saveUserToLive = async (user: any) => {
+// ===================================================
+// 🔥 USER SAVE (FIXED – NO undefined, NO PASSWORD)
+// ===================================================
+export const saveUserToLive = async (userData: any) => {
   try {
-    if (!user || !user.id) return;
-    
-    // 1. RTDB
-    const userRef = ref(rtdb, `users/${user.id}`);
-    await set(userRef, user);
-    
-    // 2. Firestore (Dual Write)
-    await setDoc(doc(db, "users", user.id), user);
-  } catch (error) {
-    console.error("Error saving user:", error);
-  }
-};
+    const authUser = auth.currentUser;
+    if (!authUser) return;
 
-export const subscribeToUsers = (callback: (users: any[]) => void) => {
-  // Prefer Firestore for Admin List (More Reliable)
-  const q = collection(db, "users");
-  return onSnapshot(q, (snapshot) => {
-      const users = snapshot.docs.map(doc => doc.data());
-      if (users.length > 0) {
-          callback(users);
-      } else {
-          // Fallback to RTDB if Firestore is empty (migration scenario)
-          const usersRef = ref(rtdb, 'users');
-          onValue(usersRef, (snap) => {
-             const data = snap.val();
-             const userList = data ? Object.values(data) : [];
-             callback(userList);
-          }, { onlyOnce: true });
-      }
-  }, (error) => {
-      console.error("Firestore Subscription Error:", error);
-      if (error.code === 'permission-denied') {
-          alert("⚠️ Admin Access Error: Permission Denied.\n\nThe server rejected your request. This usually happens if your Admin Account isn't synced.\n\nTry Logging Out and Logging In again to fix permissions.");
-      }
-  });
-};
+    const uid = authUser.uid;
 
-export const getUserData = async (userId: string) => {
-    try {
-        // Try RTDB
-        const snap = await get(ref(rtdb, `users/${userId}`));
-        if (snap.exists()) return snap.val();
-        
-        // Try Firestore
-        const docSnap = await getDoc(doc(db, "users", userId));
-        if (docSnap.exists()) return docSnap.data();
+    const safeUser = {
+      id: uid,
+      name: userData.name || "",
+      email: userData.email || authUser.email || "",
+      mobile: userData.mobile || "",
+      board: userData.board || "",
+      classLevel: userData.classLevel || "",
+      role: userData.role || "STUDENT",
+      credits: userData.credits ?? 0,
+      isPremium: userData.isPremium ?? false,
+      subscriptionTier: userData.subscriptionTier || "FREE",
+      createdAt: new Date().toISOString(),
+      lastLoginDate: new Date().toISOString(),
+      streak: userData.streak ?? 0,
+      progress: userData.progress || {}
+    };
 
-        return null;
-    } catch (e) { console.error(e); return null; }
-};
-
-export const getUserByEmail = async (email: string) => {
-    try {
-        const q = query(collection(db, "users"), where("email", "==", email));
-        const querySnapshot = await getDocs(q);
-        if (!querySnapshot.empty) {
-            return querySnapshot.docs[0].data();
-        }
-        return null; 
-    } catch (e) { console.error(e); return null; }
-};
-
-// 2. System Settings Sync
-export const saveSystemSettings = async (settings: any) => {
-  try {
-    await set(ref(rtdb, 'system_settings'), settings);
-    await setDoc(doc(db, "config", "system_settings"), settings);
-  } catch (error) {
-    console.error("Error saving settings:", error);
-  }
-};
-
-export const subscribeToSettings = (callback: (settings: any) => void) => {
-  // Listen to Firestore
-  return onSnapshot(doc(db, "config", "system_settings"), (docSnap) => {
-      if (docSnap.exists()) {
-          callback(docSnap.data());
-      } else {
-          // Fallback RTDB
-           onValue(ref(rtdb, 'system_settings'), (snap) => {
-               const data = snap.val();
-               if (data) callback(data);
-           }, { onlyOnce: true });
-      }
-  });
-};
-
-// 3. Content Links Sync (Bulk Uploads)
-export const bulkSaveLinks = async (updates: Record<string, any>) => {
-  try {
     // RTDB
-    await update(ref(rtdb, 'content_links'), updates);
-    
-    // Firestore - We save each update as a document in 'content_data' collection
-    // 'updates' is a map of key -> data
-    const batchPromises = Object.entries(updates).map(async ([key, data]) => {
-         await setDoc(doc(db, "content_data", key), data);
-    });
-    await Promise.all(batchPromises);
+    await set(ref(rtdb, `users/${uid}`), safeUser);
 
-  } catch (error) {
-    console.error("Error bulk saving links:", error);
+    // Firestore
+    await setDoc(doc(db, "users", uid), safeUser, { merge: true });
+
+  } catch (err) {
+    console.error("❌ saveUserToLive failed:", err);
   }
 };
 
-// 4. Chapter Data Sync (Individual)
-export const saveChapterData = async (key: string, data: any) => {
+// ===================================================
+// 👥 ADMIN / USER LIST (FIXED)
+// ===================================================
+export const subscribeToUsers = (callback: (users: any[]) => void) => {
+  const usersCol = collection(db, "users");
+
+  return onSnapshot(usersCol, (snap) => {
+    const list = snap.docs
+      .map(d => d.data())
+      .filter(u => u && u.id); // 🔥 no undefined
+    callback(list);
+  });
+};
+
+// ===================================================
+// 🔍 GET USER DATA (SMART READ)
+// ===================================================
+export const getUserData = async (uid: string) => {
   try {
-    await set(ref(rtdb, `content_data/${key}`), data);
-    await setDoc(doc(db, "content_data", key), data);
-  } catch (error) {
-    console.error("Error saving chapter data:", error);
+    const rSnap = await get(ref(rtdb, `users/${uid}`));
+    if (rSnap.exists()) return rSnap.val();
+
+    const fSnap = await getDoc(doc(db, "users", uid));
+    if (fSnap.exists()) return fSnap.data();
+
+    return null;
+  } catch (e) {
+    console.error(e);
+    return null;
   }
+};
+
+// ===================================================
+// 📧 GET USER BY EMAIL
+// ===================================================
+export const getUserByEmail = async (email: string) => {
+  const q = query(collection(db, "users"), where("email", "==", email));
+  const snap = await getDocs(q);
+  if (!snap.empty) return snap.docs[0].data();
+  return null;
+};
+
+// ===================================================
+// 📚 CONTENT DATA (STUDENT FEATURES)
+// ===================================================
+export const saveChapterData = async (key: string, data: any) => {
+  await set(ref(rtdb, `content_data/${key}`), data);
+  await setDoc(doc(db, "content_data", key), data);
 };
 
 export const getChapterData = async (key: string) => {
-    try {
-        // 1. Try RTDB (Faster)
-        const snapshot = await get(ref(rtdb, `content_data/${key}`));
-        if (snapshot.exists()) {
-            return snapshot.val();
-        }
-        
-        // 2. Fallback to Firestore
-        const docSnap = await getDoc(doc(db, "content_data", key));
-        if (docSnap.exists()) {
-            return docSnap.data();
-        }
-        
-        return null;
-    } catch (error) {
-        console.error("Error getting chapter data:", error);
-        return null;
-    }
+  const r = await get(ref(rtdb, `content_data/${key}`));
+  if (r.exists()) return r.val();
+
+  const f = await getDoc(doc(db, "content_data", key));
+  if (f.exists()) return f.data();
+
+  return null;
 };
 
-// Used by client to listen for realtime changes to a specific chapter
-export const subscribeToChapterData = (key: string, callback: (data: any) => void) => {
-    const rtdbRef = ref(rtdb, `content_data/${key}`);
-    return onValue(rtdbRef, (snapshot) => {
-        if (snapshot.exists()) {
-            callback(snapshot.val());
-        } else {
-            // If not in RTDB, check Firestore (one-time fetch or snapshot?)
-            // For now, let's just do one-time fetch to avoid complexity of double listeners
-            getDoc(doc(db, "content_data", key)).then(docSnap => {
-                if (docSnap.exists()) callback(docSnap.data());
-            });
-        }
-    });
+export const subscribeToChapterData = (key: string, cb: (d:any)=>void) => {
+  return onValue(ref(rtdb, `content_data/${key}`), snap => {
+    if (snap.exists()) cb(snap.val());
+  });
 };
 
-
-export const saveTestResult = async (userId: string, attempt: any) => {
-    try {
-        const docId = `${attempt.testId}_${Date.now()}`;
-        await setDoc(doc(db, "users", userId, "test_results", docId), attempt);
-    } catch(e) { console.error(e); }
+// ===================================================
+// 📝 TEST RESULTS
+// ===================================================
+export const saveTestResult = async (uid: string, attempt: any) => {
+  const id = `${attempt.testId}_${Date.now()}`;
+  await setDoc(doc(db, "users", uid, "test_results", id), attempt);
 };
 
-export const updateUserStatus = async (userId: string, time: number) => {
-     try {
-        const userRef = ref(rtdb, `users/${userId}`);
-        await update(userRef, { lastActiveTime: new Date().toISOString() });
-    } catch (error) {
-    }
+// ===================================================
+// ⏱️ USER ACTIVITY
+// ===================================================
+export const updateUserStatus = async (uid: string) => {
+  await update(ref(rtdb, `users/${uid}`), {
+    lastActiveTime: new Date().toISOString()
+  });
 };
-
-export { app, db, rtdb, auth };
